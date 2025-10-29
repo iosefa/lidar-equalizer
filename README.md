@@ -1,6 +1,8 @@
 # lidar-equalizer
 *A lightweight C++17 tool and PDAL extension for overlap-aware LiDAR density normalization.*
 
+![Point densities](img/point_densities.png)
+
 ## Overview
 `lidar-equalizer` balances point densities across overlapping LiDAR flight lines using per-cell proportional thinning.
  It operates directly on LAS/LAZ files via PDAL, producing uniform, analysis-ready datasets for canopy metrics or terrain modeling.
@@ -13,6 +15,17 @@ cd lidar-equalizer
 mkdir build && cd build
 cmake ..
 make -j
+```
+
+### Linux (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake pdal libpdal-dev
+git clone https://github.com/iosefa/lidar-equalizer.git
+cd lidar-equalizer
+mkdir build && cd build
+cmake ..
+make -j"$(nproc)"
 ```
 
 ## Usage
