@@ -9,6 +9,7 @@
 #include "OverlapFlagger.hpp"
 #include "OverlapOps.hpp"
 #include "OverlapSelfTest.hpp"
+#include "DtmConsistency.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +20,9 @@
 #include <string>
 #include <stdexcept>
 #include <cstring>
+#include <utility>
+#include <sstream>
+#include <vector>
 
 namespace
 {
@@ -29,7 +33,8 @@ void printUsage(const char* argv0)
     std::cerr << "Usage: " << argv0
               << " input.laz output_equalized.laz [cell_size] [target_density] [seed]"
               << " [--class-scope=all|nonground|ground]"
-              << " [--flag-overlap-only|--equalize-overlap-only|--join-overlap-by-scan-angle]"
+              << " [--flag-overlap-only|--equalize-overlap-only|--join-overlap-by-scan-angle|--dtm-consistency]"
+              << " [--dtm=<path> --dtm-threshold=<meters> --dtm-reclass=<class>]"
               << "\n       or: " << argv0 << " --self-test-overlap\n";
 }
 
@@ -129,12 +134,124 @@ std::string swathKeyToString(overlap::SwathKeyMode mode)
     return "psid";
 }
 
+bool isCoreLasDimension(pdal::Dimension::Id dim)
+{
+    using pdal::Dimension::Id;
+    switch (dim)
+    {
+    case Id::X:
+    case Id::Y:
+    case Id::Z:
+    case Id::Intensity:
+    case Id::ReturnNumber:
+    case Id::NumberOfReturns:
+    case Id::ScanDirectionFlag:
+    case Id::EdgeOfFlightLine:
+    case Id::Classification:
+    case Id::ScanAngleRank:
+    case Id::UserData:
+    case Id::PointSourceId:
+    case Id::GpsTime:
+    case Id::Red:
+    case Id::Green:
+    case Id::Blue:
+    case Id::Infrared:
+    case Id::ClassFlags:
+    case Id::Overlap:
+    case Id::Withheld:
+    case Id::Synthetic:
+    case Id::KeyPoint:
+    case Id::ScanChannel:
+        return true;
+    default:
+        break;
+    }
+    return false;
+}
+
+std::string dimensionTypeToString(pdal::Dimension::Type type)
+{
+    using pdal::Dimension::Type;
+    switch (type)
+    {
+    case Type::Signed8:
+        return "int8";
+    case Type::Signed16:
+        return "int16";
+    case Type::Signed32:
+        return "int32";
+    case Type::Signed64:
+        return "int64";
+    case Type::Unsigned8:
+        return "uint8";
+    case Type::Unsigned16:
+        return "uint16";
+    case Type::Unsigned32:
+        return "uint32";
+    case Type::Unsigned64:
+        return "uint64";
+    case Type::Float:
+        return "float";
+    case Type::Double:
+        return "double";
+    case Type::None:
+    default:
+        return {};
+    }
+}
+
+std::string buildExtraDimsSpec(const pdal::PointView& view,
+                               std::vector<std::pair<std::string, pdal::Dimension::Type>>* details = nullptr)
+{
+    auto layout = view.layout();
+    if (!layout)
+        return {};
+
+    std::vector<std::string> specs;
+    for (const auto dim : layout->dims())
+    {
+        if (isCoreLasDimension(dim))
+            continue;
+
+        const auto* detail = layout->dimDetail(dim);
+        if (!detail)
+            continue;
+
+        std::string dimName = layout->dimName(dim);
+        if (dimName.empty())
+            dimName = pdal::Dimension::name(dim);
+        const std::string typeName = dimensionTypeToString(detail->type());
+        if (dimName.empty() || typeName.empty())
+            continue;
+
+        if (details)
+            details->emplace_back(dimName, detail->type());
+        specs.emplace_back(dimName + "=" + typeName);
+    }
+
+    if (specs.empty())
+        return {};
+
+    std::sort(specs.begin(), specs.end());
+    specs.erase(std::unique(specs.begin(), specs.end()), specs.end());
+
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < specs.size(); ++i)
+    {
+        if (i != 0)
+            oss << ',';
+        oss << specs[i];
+    }
+    return oss.str();
+}
+
 enum class Mode
 {
     EqualizeAll,
     OverlapFlagOnly,
     EqualizeOverlapOnly,
-    JoinOverlapByScanAngle
+    JoinOverlapByScanAngle,
+    DtmConsistency
 };
 
 int main(int argc, char** argv)
@@ -158,6 +275,8 @@ int main(int argc, char** argv)
     overlap::OverlapParams overlapParams;
     bool overwriteOverlap = false;
     Mode mode = Mode::EqualizeAll;
+    bool joinKeepGround = false;
+    DtmConsistencyOptions dtmOptions;
 
     auto setMode = [&](Mode desired, bool enable) {
         if (!enable)
@@ -253,6 +372,26 @@ int main(int argc, char** argv)
                     val = parseBoolOption(argv[++argIndex]);
                 setMode(Mode::JoinOverlapByScanAngle, val);
             }
+            else if (arg.rfind("--dtm-consistency", 0) == 0)
+            {
+                bool val = true;
+                auto eq = arg.find('=');
+                if (eq != std::string::npos)
+                    val = parseBoolOption(arg.substr(eq + 1));
+                else if (argIndex + 1 < argc && !isFlag(argv[argIndex + 1]))
+                    val = parseBoolOption(argv[++argIndex]);
+                setMode(Mode::DtmConsistency, val);
+            }
+            else if (arg.rfind("--join-keep-ground", 0) == 0)
+            {
+                bool val = true;
+                auto eq = arg.find('=');
+                if (eq != std::string::npos)
+                    val = parseBoolOption(arg.substr(eq + 1));
+                else if (argIndex + 1 < argc && !isFlag(argv[argIndex + 1]))
+                    val = parseBoolOption(argv[++argIndex]);
+                joinKeepGround = val;
+            }
             else if (arg.rfind("--overwrite-overlap", 0) == 0)
             {
                 bool val = true;
@@ -307,12 +446,93 @@ int main(int argc, char** argv)
                 }
                 overlapParams.swathKey = parseSwathKey(value);
             }
+            else if (arg == "--dtm")
+            {
+                if (++argIndex >= argc)
+                    throw std::invalid_argument("--dtm requires a path");
+                dtmOptions.dtmPath = argv[argIndex];
+                ++argIndex;
+                continue;
+            }
+            else if (arg.rfind("--dtm=", 0) == 0)
+            {
+                dtmOptions.dtmPath = arg.substr(6);
+                ++argIndex;
+                continue;
+            }
+            else if (arg == "--dtm-threshold")
+            {
+                if (++argIndex >= argc)
+                    throw std::invalid_argument("--dtm-threshold requires a value");
+                dtmOptions.threshold = std::stod(argv[argIndex]);
+                if (dtmOptions.threshold < 0.0)
+                    throw std::invalid_argument("--dtm-threshold must be non-negative");
+                ++argIndex;
+                continue;
+            }
+            else if (arg.rfind("--dtm-threshold=", 0) == 0)
+            {
+                dtmOptions.threshold = std::stod(arg.substr(16));
+                if (dtmOptions.threshold < 0.0)
+                    throw std::invalid_argument("--dtm-threshold must be non-negative");
+                ++argIndex;
+                continue;
+            }
+            else if (arg == "--dtm-reclass")
+            {
+                if (++argIndex >= argc)
+                    throw std::invalid_argument("--dtm-reclass requires a value");
+                int parsed = std::stoi(argv[argIndex]);
+                if (parsed < 0 || parsed > 255)
+                    throw std::invalid_argument("--dtm-reclass must be in [0,255]");
+                dtmOptions.reclassValue = static_cast<std::uint8_t>(parsed);
+                ++argIndex;
+                continue;
+            }
+            else if (arg.rfind("--dtm-reclass=", 0) == 0)
+            {
+                int parsed = std::stoi(arg.substr(14));
+                if (parsed < 0 || parsed > 255)
+                    throw std::invalid_argument("--dtm-reclass must be in [0,255]");
+                dtmOptions.reclassValue = static_cast<std::uint8_t>(parsed);
+                ++argIndex;
+                continue;
+            }
+            else if (arg == "--dtm-action")
+            {
+                if (++argIndex >= argc)
+                    throw std::invalid_argument("--dtm-action requires a value");
+                std::string value = toLowerCopy(argv[argIndex]);
+                if (value == "reclass" || value == "reclassify")
+                    dtmOptions.action = DtmConsistencyOptions::Action::Reclassify;
+                else if (value == "delete" || value == "drop")
+                    dtmOptions.action = DtmConsistencyOptions::Action::Delete;
+                else
+                    throw std::invalid_argument("--dtm-action must be reclass or delete");
+                ++argIndex;
+                continue;
+            }
+            else if (arg.rfind("--dtm-action=", 0) == 0)
+            {
+                std::string value = toLowerCopy(arg.substr(13));
+                if (value == "reclass" || value == "reclassify")
+                    dtmOptions.action = DtmConsistencyOptions::Action::Reclassify;
+                else if (value == "delete" || value == "drop")
+                    dtmOptions.action = DtmConsistencyOptions::Action::Delete;
+                else
+                    throw std::invalid_argument("--dtm-action must be reclass or delete");
+                ++argIndex;
+                continue;
+            }
             else
             {
                 throw std::invalid_argument("Unknown argument: " + arg);
             }
             ++argIndex;
         }
+
+        if (mode == Mode::DtmConsistency && dtmOptions.dtmPath.empty())
+            throw std::invalid_argument("--dtm-consistency requires --dtm=<path>");
 
         auto tStart = std::chrono::steady_clock::now();
 
@@ -370,8 +590,7 @@ int main(int argc, char** argv)
 
         auto prepareWriterOptions = [&](pdal::Options& writerOpts) {
             writerOpts.add("filename", output);
-            if (writerDriver != "writers.copc")
-                writerOpts.add("forward", "all");
+            writerOpts.add("forward", "all");
 
             if (writerDriver == "writers.las")
             {
@@ -390,7 +609,6 @@ int main(int argc, char** argv)
                 addOptionIfAvailable<int>(writerOpts, meta, "creation_doy");
                 addOptionIfAvailable<std::string>(writerOpts, meta, "project_id");
                 addOptionIfAvailable<std::string>(writerOpts, meta, "software_id");
-                writerOpts.add("extra_dims", "all");
             }
             else if (writerDriver == "writers.copc")
             {
@@ -423,12 +641,29 @@ int main(int argc, char** argv)
             writerStage->setInput(bufferReader);
 
             pdal::Options writerOpts;
+            std::vector<std::pair<std::string, pdal::Dimension::Type>> extraDimDetails;
+            const std::string extraDimsSpec =
+                pv ? buildExtraDimsSpec(*pv, &extraDimDetails) : std::string{};
             prepareWriterOptions(writerOpts);
+            if (!extraDimsSpec.empty())
+                writerOpts.add("extra_dims", extraDimsSpec);
             writerStage->setOptions(writerOpts);
             if (!pv->spatialReference().empty())
                 writerStage->setSpatialReference(pv->spatialReference());
 
             pdal::PointTable outTable;
+            bufferReader.prepare(outTable);
+            auto outLayout = outTable.layout();
+            if (outLayout)
+            {
+                for (const auto& entry : extraDimDetails)
+                {
+                    const std::string& name = entry.first;
+                    const auto type = entry.second;
+                    if (outLayout->findDim(name) == pdal::Dimension::Id::Unknown)
+                        outLayout->registerOrAssignDim(name, type);
+                }
+            }
             writerStage->prepare(outTable);
             writerStage->execute(outTable);
         };
@@ -488,7 +723,7 @@ int main(int argc, char** argv)
         {
             auto [mask, maskStats] = maybeBuildMask();
             overlap::JoinOverlapStats joinStats;
-            auto joined = overlap::joinOverlapByScanAngle(view, mask, &joinStats);
+            auto joined = overlap::joinOverlapByScanAngle(view, mask, joinKeepGround, &joinStats);
             writeViewToFile(joined);
 
             const auto elapsed =
@@ -500,7 +735,38 @@ int main(int argc, char** argv)
             std::cout << "Overlap kept : " << joinStats.keptOverlapPoints
                       << " / " << joinStats.overlapPoints
                       << " (dropped " << joinStats.droppedOverlapPoints << ")" << '\n';
+            if (joinKeepGround)
+                std::cout << "Ground kept  : " << joinStats.groundPreserved << " (extra points)" << '\n';
             std::cout << "Output points: " << joined->size() << '\n';
+            std::cout << "Done in " << std::fixed << std::setprecision(1) << elapsed << " s." << '\n';
+            return 0;
+        }
+
+        if (mode == Mode::DtmConsistency)
+        {
+            DtmConsistencyStats dtmStats;
+            auto processed = applyDtmConsistency(view, dtmOptions, &dtmStats);
+            writeViewToFile(processed);
+
+            const auto elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - modeStart).count();
+
+            std::cout << "Mode         : dtm-consistency" << '\n';
+            std::cout << "Input points : " << view->size() << '\n';
+            std::cout << "Ground tested: " << dtmStats.groundTested << '\n';
+            if (dtmOptions.action == DtmConsistencyOptions::Action::Delete)
+            {
+                std::cout << "Removed outliers: " << dtmStats.removed << '\n';
+            }
+            else
+            {
+                std::cout << "Reclassified : " << dtmStats.reclassified << " (class "
+                          << static_cast<int>(dtmOptions.reclassValue) << ")" << '\n';
+            }
+            std::cout << "Outside DTM  : " << dtmStats.outsideRaster
+                      << " | NODATA skipped: " << dtmStats.nodataSkipped << '\n';
+            std::cout << "Threshold    : " << dtmOptions.threshold << " m" << '\n';
+            std::cout << "Output points: " << processed->size() << '\n';
             std::cout << "Done in " << std::fixed << std::setprecision(1) << elapsed << " s." << '\n';
             return 0;
         }

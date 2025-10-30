@@ -214,6 +214,7 @@ pdal::PointViewPtr equalizeOverlapOnly(pdal::PointViewPtr view,
 
 pdal::PointViewPtr joinOverlapByScanAngle(pdal::PointViewPtr view,
                                           const OverlapMask& mask,
+                                          bool keepGround,
                                           JoinOverlapStats* stats)
 {
     if (!view)
@@ -235,6 +236,7 @@ pdal::PointViewPtr joinOverlapByScanAngle(pdal::PointViewPtr view,
     const auto dimPsid = pdal::Dimension::Id::PointSourceId;
     const auto dimScanner = pdal::Dimension::Id::ScanChannel;
     std::vector<std::vector<pdal::PointId>> flaggedPoints(mask.nx * mask.ny);
+    std::vector<pdal::PointId> groundKeep;
     std::vector<char> keep(view->size(), 0);
 
     std::size_t overlapPoints = 0;
@@ -251,6 +253,12 @@ pdal::PointViewPtr joinOverlapByScanAngle(pdal::PointViewPtr view,
             if (cellId >= flaggedPoints.size())
                 throw std::runtime_error("Overlap mask cell index out of range");
             flaggedPoints[cellId].push_back(pid);
+            if (keepGround && layout && layout->hasDim(pdal::Dimension::Id::Classification))
+            {
+                auto cls = view->getFieldAs<std::uint8_t>(pdal::Dimension::Id::Classification, pid);
+                if (cls == 2)
+                    groundKeep.push_back(pid);
+            }
         }
         else
         {
@@ -295,32 +303,42 @@ pdal::PointViewPtr joinOverlapByScanAngle(pdal::PointViewPtr view,
             }
         }
 
-        if (hasBest)
-        {
-            auto matchesBest = [&](pdal::PointId pid) {
-                if (view->getFieldAs<std::uint16_t>(dimPsid, pid) != best.psid)
-                    return false;
-                if (mask.swathKeyUsed == SwathKeyMode::PointSourceIdChannel)
-                {
-                    const std::uint8_t ch = hasScanner
-                                                ? view->getFieldAs<std::uint8_t>(dimScanner, pid)
-                                                : static_cast<std::uint8_t>(0);
-                    return ch == best.channel;
-                }
-                return true;
-            };
+        if (!hasBest)
+            continue;
 
-            for (pdal::PointId pid : ids)
+        auto matchesBest = [&](pdal::PointId pid) {
+            if (view->getFieldAs<std::uint16_t>(dimPsid, pid) != best.psid)
+                return false;
+            if (mask.swathKeyUsed == SwathKeyMode::PointSourceIdChannel)
             {
-                if (matchesBest(pid))
+                const std::uint8_t ch = hasScanner
+                                            ? view->getFieldAs<std::uint8_t>(dimScanner, pid)
+                                            : static_cast<std::uint8_t>(0);
+                return ch == best.channel;
+            }
+            return true;
+        };
+
+        for (pdal::PointId pid : ids)
+        {
+            if (matchesBest(pid))
+            {
+                if (!keep[pid])
                 {
-                    if (!keep[pid])
-                    {
-                        keep[pid] = 1;
-                        ++keptOverlap;
-                    }
+                    keep[pid] = 1;
+                    ++keptOverlap;
                 }
             }
+        }
+    }
+
+    std::size_t groundPreserved = 0;
+    for (pdal::PointId pid : groundKeep)
+    {
+        if (!keep[pid])
+        {
+            keep[pid] = 1;
+            ++groundPreserved;
         }
     }
 
@@ -335,6 +353,7 @@ pdal::PointViewPtr joinOverlapByScanAngle(pdal::PointViewPtr view,
         stats->overlapPoints = overlapPoints;
         stats->keptOverlapPoints = keptOverlap;
         stats->droppedOverlapPoints = overlapPoints >= keptOverlap ? overlapPoints - keptOverlap : 0;
+        stats->groundPreserved = groundPreserved;
     }
 
     return output;

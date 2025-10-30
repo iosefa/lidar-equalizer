@@ -112,7 +112,7 @@ bool runOverlapSelfTest()
     }
 
     JoinOverlapStats joinStats;
-    auto joined = joinOverlapByScanAngle(view, mask, &joinStats);
+    auto joined = joinOverlapByScanAngle(view, mask, false, &joinStats);
     if (joinStats.overlapPoints != 3 || joinStats.keptOverlapPoints != 2)
     {
         std::cerr << "[self-test] Overlap join stats off: overlap="

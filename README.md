@@ -32,7 +32,7 @@ make -j"$(nproc)"
 ```
 ./lidar_equalizer input.laz output_equalized.laz [cell_size] [target_density] [seed] \
     [--class-scope=all|nonground|ground] \
-    [--flag-overlap-only|--equalize-overlap-only|--join-overlap-by-scan-angle]
+    [--flag-overlap-only|--equalize-overlap-only|--join-overlap-by-scan-angle|--dtm-consistency]
 ```
 
 ### Example
@@ -51,6 +51,12 @@ make -j"$(nproc)"
 - `--flag-overlap-only` – run the standalone overlap flagger (read → flag → write) without thinning.
 - `--equalize-overlap-only` – thin only the points inside the detected overlap mask; non-overlap points are forwarded unchanged.
 - `--join-overlap-by-scan-angle` – keep the point with the smallest absolute scan angle within each overlap cell (ties broken by return number, intensity, GPS time).
+  - `--join-keep-ground` – while joining, always retain ground-classified points (ASPRS class 2) from every swath.
+- `--dtm-consistency` – evaluate ground points against a DTM and reclassify outliers (defaults: threshold 1 m, new class 8).
+  - `--dtm=<path>` – absolute or relative path to the reference DTM (GeoTIFF/ASCII grid supported by GDAL).
+  - `--dtm-threshold=<meters>` – vertical tolerance before reclassifying (default `1.0`).
+  - `--dtm-reclass=<class>` – destination ASPRS class for outliers (default `8`).
+  - `--dtm-action=reclass|delete` – choose whether to reclassify or drop inconsistent ground points (default `reclass`).
 
 Shared options:
 - `--min-points-per-psid=<n>` – require at least `n` points from a swath in a cell before it contributes to overlap (default `1`).

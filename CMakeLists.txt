@@ -14,18 +14,41 @@ add_executable(lidar_equalizer
     src/Equalizer.cpp
     src/OverlapFlagger.cpp
     src/OverlapOps.cpp
+    src/DtmConsistency.cpp
     src/OverlapSelfTest.cpp
 )
+
+find_path(GDAL_INCLUDE_DIR
+    NAMES gdal_priv.h
+    HINTS
+        $ENV{GDAL_HOME}/include
+        /opt/homebrew/opt/gdal/include
+        /usr/local/include
+        /usr/include)
+
+find_library(GDAL_LIBRARY
+    NAMES gdal
+    HINTS
+        $ENV{GDAL_HOME}/lib
+        /opt/homebrew/opt/gdal/lib
+        /usr/local/lib
+        /usr/lib)
+
+if (NOT GDAL_INCLUDE_DIR OR NOT GDAL_LIBRARY)
+    message(FATAL_ERROR "GDAL headers or library not found. Set GDAL_HOME or install GDAL.")
+endif()
 
 target_include_directories(lidar_equalizer
     PRIVATE
         ${PDAL_INCLUDE_DIRS}
+        ${GDAL_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(lidar_equalizer
     PRIVATE
         ${PDAL_LIBRARIES}
+        ${GDAL_LIBRARY}
 )
 
 include(CTest)
